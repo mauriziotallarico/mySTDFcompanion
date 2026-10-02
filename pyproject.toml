@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stdfcompanion"
+version = "0.1.0"
+description = "CLI tool for parsing and manipulating STDF (Standard Test Data Format) files"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Maurizio Tallarico" }
+]
+keywords = ["stdf", "semiconductor", "ate", "test-data"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Manufacturing",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pystdf>=1.4.0",
+    "click>=8.0",
+]
+
+[project.scripts]
+stdfcompanion = "stdfcompanion.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stdfcompanion*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
