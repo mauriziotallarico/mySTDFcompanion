@@ -10,9 +10,15 @@ Merge two files::
 
     stdfcompanion merge file1.stdf file2.stdf -o merged.stdf
 
-Merge with verbose output::
+Check a file for errors::
 
-    stdfcompanion merge a.stdf b.stdf c.stdf -o out.stdf --verbose
+    stdfcompanion check file.stdf
+    stdfcompanion check file.stdf --warnings --json
+
+Repair a file::
+
+    stdfcompanion repair file.stdf -o repaired.stdf
+    stdfcompanion repair file.stdf -o repaired.stdf --verbose
 
 Show version::
 
@@ -21,6 +27,7 @@ Show version::
 
 from __future__ import annotations
 
+import json
 import sys
 import click
 
@@ -65,9 +72,8 @@ def merge_cmd(inputs, output, verbose):
 
     INPUTS is one or more input STDF files (at least 2 required).
 
-    Example:
-
     \b
+    Example:
         stdfcompanion merge lot1.stdf lot2.stdf -o merged.stdf
         stdfcompanion merge a.stdf b.stdf c.stdf -o combined.stdf --verbose
     """
@@ -90,6 +96,198 @@ def merge_cmd(inputs, output, verbose):
         sys.exit(1)
 
     click.echo(f"Merged {len(inputs)} files -> {output}")
+
+
+# ---------------------------------------------------------------------------
+# check sub-command
+# ---------------------------------------------------------------------------
+
+@main.command("check")
+@click.argument(
+    "inputs",
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--warnings/--no-warnings",
+    default=True,
+    show_default=True,
+    help="Include WARNING-level issues in output.",
+)
+@click.option(
+    "--info/--no-info",
+    default=False,
+    show_default=True,
+    help="Include INFO-level issues in output.",
+)
+@click.option(
+    "--json", "as_json",
+    is_flag=True,
+    default=False,
+    help="Output results as JSON (useful for scripting).",
+)
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print progress information.",
+)
+def check_cmd(inputs, warnings, info, as_json, verbose):
+    """Check one or more STDF files for errors and structural issues.
+
+    Exits with code 0 if all files pass (no ERROR-level issues),
+    non-zero otherwise.
+
+    \b
+    Example:
+        stdfcompanion check file.stdf
+        stdfcompanion check a.stdf b.stdf --warnings --json
+    """
+    from stdfcompanion.commands.check import check_stdf, Severity
+
+    any_error = False
+    all_results = []
+
+    for path in inputs:
+        result = check_stdf(path, verbose=verbose)
+        all_results.append(result)
+        if not result.ok:
+            any_error = True
+
+    if as_json:
+        output = []
+        for r in all_results:
+            issues = []
+            for i in r.issues:
+                if i.severity == Severity.ERROR:
+                    pass
+                elif i.severity == Severity.WARNING and not warnings:
+                    continue
+                elif i.severity == Severity.INFO and not info:
+                    continue
+                issues.append({
+                    "code":     i.code,
+                    "severity": i.severity.value,
+                    "message":  i.message,
+                    "offset":   i.offset,
+                    "record":   i.record,
+                })
+            output.append({
+                "file":    r.path,
+                "ok":      r.ok,
+                "summary": r.summary(),
+                "issues":  issues,
+            })
+        click.echo(json.dumps(output, indent=2))
+    else:
+        for result in all_results:
+            click.echo(f"\n{'='*60}")
+            click.echo(f"File: {result.path}")
+            click.echo(f"{'='*60}")
+
+            shown = 0
+            for issue in result.issues:
+                if issue.severity == Severity.ERROR:
+                    click.echo(str(issue))
+                    shown += 1
+                elif issue.severity == Severity.WARNING and warnings:
+                    click.echo(str(issue))
+                    shown += 1
+                elif issue.severity == Severity.INFO and info:
+                    click.echo(str(issue))
+                    shown += 1
+
+            if shown == 0:
+                click.echo("  (no issues found at selected severity levels)")
+
+            click.echo(f"\n  {result.summary()}")
+
+    sys.exit(1 if any_error else 0)
+
+
+# ---------------------------------------------------------------------------
+# repair sub-command
+# ---------------------------------------------------------------------------
+
+@main.command("repair")
+@click.argument(
+    "input",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "-o", "--output",
+    required=True,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Output path for the repaired STDF file.",
+)
+@click.option(
+    "--check-after/--no-check-after",
+    default=True,
+    show_default=True,
+    help="Run check on the repaired file and show remaining issues.",
+)
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print each repair action applied.",
+)
+def repair_cmd(input, output, check_after, verbose):
+    """Attempt to repair a malformed STDF file.
+
+    Reads INPUT, applies all applicable automatic repairs, and writes the
+    result to OUTPUT.  The original file is never modified.
+
+    \b
+    Automatic repairs include:
+      - Force FAR CPU_TYPE=2 and STDF_VER=4
+      - Insert missing MIR or MRR
+      - Move MRR to end of file
+      - Close unmatched PIR/PRR, WIR/WRR pairs
+      - Fix zero or inverted timestamps
+
+    \b
+    Example:
+        stdfcompanion repair bad.stdf -o fixed.stdf
+        stdfcompanion repair bad.stdf -o fixed.stdf --verbose
+    """
+    from stdfcompanion.commands.repair import repair_stdf
+    from stdfcompanion.commands.check  import check_stdf, Severity
+
+    if verbose:
+        click.echo(f"stdfcompanion repair  v{__version__}")
+        click.echo(f"  Input  : {input}")
+        click.echo(f"  Output : {output}")
+
+    try:
+        result = repair_stdf(input, output, verbose=verbose)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if result.repaired:
+        click.echo(f"\n{len(result.actions)} repair(s) applied:")
+        for act in result.actions:
+            click.echo(f"  {act}")
+    else:
+        click.echo("No repairs were necessary.")
+
+    click.echo(f"\n{result.summary()}")
+    click.echo(f"Repaired file written to: {output}")
+
+    if check_after:
+        click.echo("\nPost-repair check:")
+        post = check_stdf(output, verbose=False)
+        if post.ok:
+            click.echo("  No errors remain.")
+        else:
+            for issue in post.issues:
+                if issue.severity == Severity.ERROR:
+                    click.echo(f"  {issue}")
+        click.echo(f"  {post.summary()}")
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

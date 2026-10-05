@@ -7,11 +7,11 @@ Built on top of [pystdf](https://pypi.org/project/pystdf/).
 
 ## Features
 
-| Command | Description |
-|---------|-------------|
-| `merge` | Combine 2 or more STDF files into a single output file |
-
-More commands coming in future releases (split, filter, convert, inspect, …).
+| Command  | Description |
+|----------|-------------|
+| `merge`  | Combine 2 or more STDF files into a single output file |
+| `check`  | Validate an STDF file and report all structural, sequence, and content errors |
+| `repair` | Automatically repair a malformed STDF file and write a corrected copy |
 
 ---
 
@@ -46,24 +46,141 @@ pip install -e ".[dev]"
 ```
 stdfcompanion merge [OPTIONS] INPUTS...
 
-  Merge two or more STDF files into a single output file.
-
 Options:
   -o, --output PATH   Output STDF file path.  [required]
   -v, --verbose       Print progress information.
-  --version           Show version and exit.
-  --help              Show this message and exit.
 ```
-
-**Examples**
 
 ```bash
-# Merge two lots
 stdfcompanion merge lot1.stdf lot2.stdf -o merged.stdf
-
-# Merge three files with verbose output
 stdfcompanion merge a.stdf b.stdf c.stdf -o combined.stdf --verbose
 ```
+
+---
+
+### `check` — validate an STDF file
+
+```
+stdfcompanion check [OPTIONS] INPUTS...
+
+Options:
+  --warnings / --no-warnings   Include WARNING issues (default: on)
+  --info / --no-info           Include INFO issues (default: off)
+  --json                       Output results as JSON
+  -v, --verbose                Print progress information.
+```
+
+Exit code is **0** when no ERROR-level issues are found, **1** otherwise — suitable for CI pipelines.
+
+```bash
+# Check a single file
+stdfcompanion check myfile.stdf
+
+# Check multiple files, show all warnings, output as JSON
+stdfcompanion check a.stdf b.stdf --warnings --json
+
+# Suppress warnings (errors only)
+stdfcompanion check myfile.stdf --no-warnings
+```
+
+**Example output**
+
+```
+============================================================
+File: bad.stdf
+============================================================
+[ERROR] E012: MRR (Master Results Record) is missing
+[ERROR] E015: PIR for head=1 site=1 at offset 32 has no matching PRR [offset=32]
+[WARNING] E030: MIR field LOT_ID is empty or missing [offset=6] in MIR
+
+  FAIL  2 error(s)  1 warning(s)  0 info(s)
+```
+
+#### Error codes
+
+| Code | Severity | Description |
+|------|----------|-------------|
+| E001 | ERROR    | File too small to be a valid STDF |
+| E002 | ERROR    | First record is not a FAR |
+| E003 | ERROR    | FAR STDF_VER ≠ 4 |
+| E004 | WARNING  | FAR CPU_TYPE is non-standard |
+| E005 | ERROR    | Truncated record / file |
+| E006 | WARNING  | Unknown record type/subtype |
+| E010 | ERROR    | MIR missing |
+| E011 | ERROR    | Duplicate MIR |
+| E012 | ERROR    | MRR missing |
+| E013 | ERROR    | MRR is not the last record |
+| E014 | WARNING  | No PCR found |
+| E015 | ERROR    | Unmatched PIR (no closing PRR) |
+| E016 | ERROR    | Orphan PRR (no opening PIR) |
+| E017 | WARNING  | Unmatched WIR |
+| E018 | WARNING  | Orphan WRR |
+| E019 | WARNING  | Unmatched BPS |
+| E020 | WARNING  | Orphan EPS |
+| E030 | WARNING  | Mandatory MIR string field is empty |
+| E031 | WARNING  | PTR/FTR/MPR outside a PIR–PRR block |
+| E032 | WARNING  | PRR HARD_BIN = 0 |
+| E033 | WARNING  | PCR PART_CNT = 0 |
+| E034 | WARNING  | Duplicate PART_ID within the lot |
+| E035 | ERROR    | HBR/SBR bin number out of range |
+| E036 | INFO     | ATR CMD_LINE is empty |
+| E040 | WARNING  | MIR START_T = 0 |
+| E041 | ERROR    | MRR FINISH_T < MIR START_T |
+| E042 | WARNING  | MRR FINISH_T = 0 |
+
+---
+
+### `repair` — fix a malformed STDF file
+
+```
+stdfcompanion repair [OPTIONS] INPUT
+
+Options:
+  -o, --output PATH            Output path for the repaired file.  [required]
+  --check-after / --no-check-after  Run check on repaired file (default: on)
+  -v, --verbose                Print each repair action applied.
+```
+
+The original file is **never modified**.
+
+```bash
+stdfcompanion repair bad.stdf -o fixed.stdf
+stdfcompanion repair bad.stdf -o fixed.stdf --verbose
+```
+
+**Example output**
+
+```
+2 repair(s) applied:
+  [E012] Synthetic MRR appended at end of file
+  [E015] Synthetic PRR inserted for unmatched PIR (head=1 site=1)
+
+2 repair(s) applied  errors: 2 → 0
+Repaired file written to: fixed.stdf
+
+Post-repair check:
+  No errors remain.
+  OK  0 error(s)  1 warning(s)  0 info(s)
+```
+
+#### Automatic repairs
+
+| Code  | Action |
+|-------|--------|
+| E003  | Force FAR STDF_VER = 4 |
+| E004  | Force FAR CPU_TYPE = 2 (little-endian) |
+| E010  | Insert synthetic MIR with placeholder values |
+| E012  | Append synthetic MRR |
+| E013  | Move MRR to end of file |
+| E015  | Insert synthetic closing PRR for open PIR |
+| E016  | Insert synthetic opening PIR before orphan PRR |
+| E017  | Insert synthetic closing WRR for open WIR |
+| E018  | Insert synthetic opening WIR before orphan WRR |
+| E040  | Set MIR START_T from MRR FINISH_T |
+| E041  | Set MRR FINISH_T = MIR START_T |
+| E042  | Set MRR FINISH_T to current time |
+
+A new **ATR** record is always added to the repaired file documenting the repair.
 
 ---
 
@@ -89,13 +206,16 @@ mySTDFcompanion/
 ├── README.md
 ├── stdfcompanion/
 │   ├── __init__.py
-│   ├── cli.py          # Click entry point
-│   ├── writer.py       # STDF binary serializer
+│   ├── cli.py              # Click entry point (merge / check / repair)
+│   ├── writer.py           # STDF binary serializer
 │   └── commands/
 │       ├── __init__.py
-│       └── merge.py    # merge command logic
+│       ├── merge.py        # merge command logic
+│       ├── check.py        # validation engine
+│       └── repair.py       # repair engine
 └── tests/
-    └── test_merge.py
+    ├── test_merge.py
+    └── test_check_repair.py
 ```
 
 ---
