@@ -18,12 +18,13 @@ E016  Orphan PRR               → insert synthetic PIR before it
 E017  Unmatched WIR            → insert synthetic WRR after all records for
                                   that head/site_grp
 E018  Orphan WRR               → insert synthetic WIR before it
+E034  Duplicate PART_ID        → rename duplicates by appending _2, _3, …
+                                  (e.g. '1' → '1', '1_2', '1_3')
 E040  MIR START_T=0            → set to MRR FINISH_T (or now)
 E041  FINISH_T < START_T       → set FINISH_T = START_T
 E042  MRR FINISH_T=0           → set to now
 
 Repairs that are NOT attempted (data cannot be invented reliably):
-  - E034 duplicate PART_ID  (would require renaming parts)
   - E030 empty mandatory strings (no safe default)
   - E031 test record outside PIR/PRR (structural ambiguity)
   - E035 bin number out of range (cannot correct without knowing intent)
@@ -393,6 +394,39 @@ def repair_stdf(
             ins += 1
 
     repaired_records = fixed_records2
+
+    # --- E034: duplicate PART_ID → rename with _2, _3, ... ----------
+    # First pass: find which PART_IDs appear more than once
+    from collections import Counter
+    part_id_counts: Counter = Counter()
+    for rec_type, fields in repaired_records:
+        if _key(rec_type) == REC_PRR:
+            pid = _get_field(fields, rec_type, "PART_ID")
+            if pid:
+                part_id_counts[pid] += 1
+
+    duplicates = {pid for pid, cnt in part_id_counts.items() if cnt > 1}
+
+    if duplicates:
+        # Second pass: rename keeping the first occurrence as-is,
+        # suffixing subsequent occurrences with _2, _3, …
+        seen_ids: Dict[str, int] = {}   # pid → occurrence count seen so far
+        fixed_records3: List[Tuple] = []
+
+        for rec_type, fields in repaired_records:
+            if _key(rec_type) == REC_PRR:
+                pid = _get_field(fields, rec_type, "PART_ID")
+                if pid and pid in duplicates:
+                    seen_ids[pid] = seen_ids.get(pid, 0) + 1
+                    if seen_ids[pid] > 1:
+                        new_pid = f"{pid}_{seen_ids[pid]}"
+                        fields = _set_field(list(fields), rec_type, "PART_ID", new_pid)
+                        result.actions.append(RepairAction("E034",
+                            f"Duplicate PART_ID '{pid}' occurrence {seen_ids[pid]} "
+                            f"renamed to '{new_pid}'"))
+            fixed_records3.append((rec_type, fields))
+
+        repaired_records = fixed_records3
 
     # ---------------------------------------------------------------
     # Step 5 – add repair ATR

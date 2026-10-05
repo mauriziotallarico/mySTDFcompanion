@@ -588,3 +588,133 @@ class TestRepairCLI:
         r = runner.invoke(main, ["repair", src, "-o", dst])
         assert r.exit_code == 0
         assert "No repairs" in r.output
+
+
+# ---------------------------------------------------------------------------
+# Tests: E034 duplicate PART_ID repair
+# ---------------------------------------------------------------------------
+
+def _make_dup_part_id_stdf(path: str, part_ids: list) -> None:
+    """Write a valid STDF with the supplied PART_IDs (may contain duplicates)."""
+    ts = _ts()
+    with StdfWriter(path) as w:
+        w.write_record(V4.Far, [2, 4])
+        w.write_record(V4.Mir, [ts, ts, 1, " ", " ", " ", 65535, " ",
+                                "LOT1", "PARTA", "NODE1", "TSTR", "job"])
+        for i, pid in enumerate(part_ids):
+            w.write_record(V4.Pir, [1, 1])
+            w.write_record(V4.Prr, [1, 1, 0x00, 1, 1, 1,
+                                    -32768, -32768, 0, pid])
+        w.write_record(V4.Pcr, [255, 0, len(part_ids),
+                                 MISSING_U4, MISSING_U4, len(part_ids), MISSING_U4])
+        w.write_record(V4.Mrr, [ts, " ", None, None])
+
+
+class TestE034DuplicatePartId:
+
+    def test_check_detects_duplicate(self, tmp_path):
+        p = str(tmp_path / "dup.stdf")
+        _make_dup_part_id_stdf(p, ["1", "2", "1"])
+        result = check_stdf(p)
+        codes = {i.code for i in result.issues}
+        assert "E034" in codes
+
+    def test_check_no_duplicate_when_unique(self, tmp_path):
+        p = str(tmp_path / "ok.stdf")
+        _make_dup_part_id_stdf(p, ["1", "2", "3"])
+        result = check_stdf(p)
+        codes = {i.code for i in result.issues}
+        assert "E034" not in codes
+
+    def test_repair_renames_duplicates(self, tmp_path):
+        src = str(tmp_path / "dup.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["1", "2", "1"])
+        result = repair_stdf(src, dst)
+        codes = {a.code for a in result.actions}
+        assert "E034" in codes
+
+    def test_repair_first_occurrence_unchanged(self, tmp_path):
+        """The first '1' must stay as '1', not be renamed."""
+        src = str(tmp_path / "dup.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["1", "2", "1"])
+        repair_stdf(src, dst)
+        records = _read_stdf(dst)
+        prrs = [(rt, flds) for rt, flds in records
+                if rt.__class__.__name__ == "Prr"]
+        from stdfcompanion.commands.check import _get_field
+        first_pid = _get_field(prrs[0][1], prrs[0][0], "PART_ID")
+        assert first_pid == "1"
+
+    def test_repair_second_occurrence_renamed(self, tmp_path):
+        """The second '1' must become '1_2'."""
+        src = str(tmp_path / "dup.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["1", "2", "1"])
+        repair_stdf(src, dst)
+        records = _read_stdf(dst)
+        prrs = [(rt, flds) for rt, flds in records
+                if rt.__class__.__name__ == "Prr"]
+        from stdfcompanion.commands.check import _get_field
+        third_pid = _get_field(prrs[2][1], prrs[2][0], "PART_ID")
+        assert third_pid == "1_2"
+
+    def test_repair_three_duplicates(self, tmp_path):
+        """Three '1's become '1', '1_2', '1_3'."""
+        src = str(tmp_path / "dup3.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["1", "1", "1"])
+        repair_stdf(src, dst)
+        records = _read_stdf(dst)
+        prrs = [(rt, flds) for rt, flds in records
+                if rt.__class__.__name__ == "Prr"]
+        from stdfcompanion.commands.check import _get_field
+        pids = [_get_field(flds, rt, "PART_ID") for rt, flds in prrs]
+        assert pids == ["1", "1_2", "1_3"]
+
+    def test_repair_no_duplicates_is_noop(self, tmp_path):
+        src = str(tmp_path / "ok.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["1", "2", "3"])
+        result = repair_stdf(src, dst)
+        codes = {a.code for a in result.actions}
+        assert "E034" not in codes
+
+    def test_repaired_file_has_no_e034(self, tmp_path):
+        src = str(tmp_path / "dup.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["SN001", "SN002", "SN001", "SN001"])
+        repair_stdf(src, dst)
+        post = check_stdf(dst)
+        codes = {i.code for i in post.issues}
+        assert "E034" not in codes
+
+    def test_repair_multiple_different_duplicates(self, tmp_path):
+        """Both 'A' and 'B' appear twice; both sets get renamed."""
+        src = str(tmp_path / "multi_dup.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["A", "B", "A", "B"])
+        repair_stdf(src, dst)
+        post = check_stdf(dst)
+        codes = {i.code for i in post.issues}
+        assert "E034" not in codes
+
+    def test_repair_empty_part_id_not_renamed(self, tmp_path):
+        """Empty/None PART_IDs must not be touched (they have no identity)."""
+        src = str(tmp_path / "no_pid.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        # Parts with no PART_ID at all
+        _make_dup_part_id_stdf(src, [None, None, None])
+        result = repair_stdf(src, dst)
+        codes = {a.code for a in result.actions}
+        assert "E034" not in codes
+
+    def test_cli_repair_renames_duplicates(self, tmp_path):
+        src = str(tmp_path / "dup.stdf")
+        dst = str(tmp_path / "fixed.stdf")
+        _make_dup_part_id_stdf(src, ["1", "2", "1"])
+        runner = CliRunner()
+        r = runner.invoke(main, ["repair", src, "-o", dst, "--verbose"])
+        assert r.exit_code == 0, r.output
+        assert "E034" in r.output
