@@ -648,7 +648,7 @@ class TestE034DuplicatePartId:
         assert first_pid == "1"
 
     def test_repair_second_occurrence_renamed(self, tmp_path):
-        """The second '1' must become '1_2'."""
+        """The second '1' must become '1_retest'."""
         src = str(tmp_path / "dup.stdf")
         dst = str(tmp_path / "fixed.stdf")
         _make_dup_part_id_stdf(src, ["1", "2", "1"])
@@ -658,10 +658,10 @@ class TestE034DuplicatePartId:
                 if rt.__class__.__name__ == "Prr"]
         from stdfcompanion.commands.check import _get_field
         third_pid = _get_field(prrs[2][1], prrs[2][0], "PART_ID")
-        assert third_pid == "1_2"
+        assert third_pid == "1_retest"
 
     def test_repair_three_duplicates(self, tmp_path):
-        """Three '1's become '1', '1_2', '1_3'."""
+        """Three '1's become '1', '1_retest', '1_retest2'."""
         src = str(tmp_path / "dup3.stdf")
         dst = str(tmp_path / "fixed.stdf")
         _make_dup_part_id_stdf(src, ["1", "1", "1"])
@@ -671,7 +671,7 @@ class TestE034DuplicatePartId:
                 if rt.__class__.__name__ == "Prr"]
         from stdfcompanion.commands.check import _get_field
         pids = [_get_field(flds, rt, "PART_ID") for rt, flds in prrs]
-        assert pids == ["1", "1_2", "1_3"]
+        assert pids == ["1", "1_retest", "1_retest2"]
 
     def test_repair_no_duplicates_is_noop(self, tmp_path):
         src = str(tmp_path / "ok.stdf")

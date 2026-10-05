@@ -18,8 +18,8 @@ E016  Orphan PRR               → insert synthetic PIR before it
 E017  Unmatched WIR            → insert synthetic WRR after all records for
                                   that head/site_grp
 E018  Orphan WRR               → insert synthetic WIR before it
-E034  Duplicate PART_ID        → rename duplicates by appending _2, _3, …
-                                  (e.g. '1' → '1', '1_2', '1_3')
+E034  Duplicate PART_ID        → rename duplicates with _retest suffix
+                                  (e.g. '1' → '1', '1_retest', '1_retest2')
 E040  MIR START_T=0            → set to MRR FINISH_T (or now)
 E041  FINISH_T < START_T       → set FINISH_T = START_T
 E042  MRR FINISH_T=0           → set to now
@@ -395,8 +395,12 @@ def repair_stdf(
 
     repaired_records = fixed_records2
 
-    # --- E034: duplicate PART_ID → rename with _2, _3, ... ----------
-    # First pass: find which PART_IDs appear more than once
+    # --- E034: duplicate PART_ID → rename with _retest, _retest2, ... --
+    # Suffix scheme:
+    #   1st occurrence  → unchanged  (e.g. '1')
+    #   2nd occurrence  → _retest    (e.g. '1_retest')
+    #   3rd occurrence  → _retest2   (e.g. '1_retest2')
+    #   4th occurrence  → _retest3   (e.g. '1_retest3')  … and so on
     from collections import Counter
     part_id_counts: Counter = Counter()
     for rec_type, fields in repaired_records:
@@ -408,8 +412,6 @@ def repair_stdf(
     duplicates = {pid for pid, cnt in part_id_counts.items() if cnt > 1}
 
     if duplicates:
-        # Second pass: rename keeping the first occurrence as-is,
-        # suffixing subsequent occurrences with _2, _3, …
         seen_ids: Dict[str, int] = {}   # pid → occurrence count seen so far
         fixed_records3: List[Tuple] = []
 
@@ -418,11 +420,14 @@ def repair_stdf(
                 pid = _get_field(fields, rec_type, "PART_ID")
                 if pid and pid in duplicates:
                     seen_ids[pid] = seen_ids.get(pid, 0) + 1
-                    if seen_ids[pid] > 1:
-                        new_pid = f"{pid}_{seen_ids[pid]}"
+                    occurrence = seen_ids[pid]
+                    if occurrence > 1:
+                        # 2nd → _retest, 3rd → _retest2, 4th → _retest3, …
+                        suffix = "_retest" if occurrence == 2 else f"_retest{occurrence - 1}"
+                        new_pid = f"{pid}{suffix}"
                         fields = _set_field(list(fields), rec_type, "PART_ID", new_pid)
                         result.actions.append(RepairAction("E034",
-                            f"Duplicate PART_ID '{pid}' occurrence {seen_ids[pid]} "
+                            f"Duplicate PART_ID '{pid}' (occurrence {occurrence}) "
                             f"renamed to '{new_pid}'"))
             fixed_records3.append((rec_type, fields))
 
