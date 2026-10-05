@@ -7,11 +7,12 @@ Built on top of [pystdf](https://pypi.org/project/pystdf/).
 
 ## Features
 
-| Command  | Description |
-|----------|-------------|
-| `merge`  | Combine 2 or more STDF files into a single output file |
-| `check`  | Validate an STDF file and report all structural, sequence, and content errors |
-| `repair` | Automatically repair a malformed STDF file and write a corrected copy |
+| Command   | Description |
+|-----------|-------------|
+| `merge`   | Combine 2 or more STDF files into a single output file |
+| `check`   | Validate an STDF file and report all structural, sequence, and content errors |
+| `repair`  | Automatically repair a malformed STDF file and write a corrected copy |
+| `inspect` | Dump all records with field values in human-readable text, summary table, or JSON |
 
 ---
 
@@ -184,6 +185,94 @@ A new **ATR** record is always added to the repaired file documenting the repair
 
 ---
 
+## `inspect` — dump record contents
+
+```
+stdfcompanion inspect [OPTIONS] INPUT
+
+Options:
+  -r, --record TYPE    Only show this record type (repeatable)
+  --head N             Filter by HEAD_NUM
+  --site N             Filter by SITE_NUM
+  --part N             Only show the Nth PIR/PRR block (1-based)
+  -n, --limit N        Stop after N matching records
+  -o, --output FILE    Write to file instead of stdout
+  --summary            Print one-line-per-type count table
+  --json               Output as JSON array
+  --text               Human-readable text (default)
+  -v, --verbose        Print progress information
+```
+
+```bash
+# Full text dump of every record
+stdfcompanion inspect file.stdf
+
+# Quick record-count summary
+stdfcompanion inspect file.stdf --summary
+
+# Only PTR records for head=1 site=1
+stdfcompanion inspect file.stdf -r PTR --head 1 --site 1
+
+# Inspect the 3rd part (PIR/PRR block) in detail
+stdfcompanion inspect file.stdf --part 3
+
+# First 20 records as JSON (pipe to jq, etc.)
+stdfcompanion inspect file.stdf --json -n 20
+
+# Write full dump to a text file for sharing
+stdfcompanion inspect file.stdf -o dump.txt
+
+# Show only MIR and MRR
+stdfcompanion inspect file.stdf -r MIR -r MRR
+```
+
+**Example text output**
+
+```
+#000001  FAR     [offset=0  len=2]
+  CPU_TYPE     : 2
+  STDF_VER     : 4
+
+#000002  MIR     [offset=6  len=76]
+  SETUP_T      : 08:30:00 05-Oct-2026
+  START_T      : 08:30:00 05-Oct-2026
+  LOT_ID       : LOT001
+  PART_TYP     : TEST_PART
+  NODE_NAM     : NODE1
+  TSTR_TYP     : TSTR_X
+  JOB_NAM      : job.prg
+  ...
+
+#000004  PIR     [offset=88  len=2]  HEAD=1 SITE=1
+  HEAD_NUM     : 1
+  SITE_NUM     : 1
+
+#000005  PTR     [offset=94  len=...]
+  TEST_NUM     : 100
+  RESULT       : 1.234
+  TEST_TXT     : VoltageTest
+  ...
+```
+
+**Example summary output**
+
+```
+Record    Count  Offsets
+--------------------------------------------------
+FAR           1  offset 0
+MIR           1  offset 6
+SDR           1  offset 88
+PIR          50  offset 96 – 214454
+PTR         200  offset 102 – 214460
+PRR          50  offset 136 – 214490
+PCR           1  offset 214516
+MRR           1  offset 214540
+--------------------------------------------------
+TOTAL       305
+```
+
+---
+
 ## Merge strategy
 
 | Record type | Behaviour |
@@ -206,16 +295,18 @@ mySTDFcompanion/
 ├── README.md
 ├── stdfcompanion/
 │   ├── __init__.py
-│   ├── cli.py              # Click entry point (merge / check / repair)
-│   ├── writer.py           # STDF binary serializer
-│   └── commands/
-│       ├── __init__.py
-│       ├── merge.py        # merge command logic
-│       ├── check.py        # validation engine
-│       └── repair.py       # repair engine
-└── tests/
-    ├── test_merge.py
-    └── test_check_repair.py
+│   ├── cli.py              # Click entry point (merge / check / repair / inspect)
+        │   ├── writer.py           # STDF binary serializer
+        │   └── commands/
+        │       ├── __init__.py
+        │       ├── merge.py        # merge command logic
+        │       ├── check.py        # validation engine
+        │       ├── repair.py       # repair engine
+        │       └── inspect.py      # record dump engine
+        └── tests/
+            ├── test_merge.py
+            ├── test_check_repair.py
+            └── test_inspect.py
 ```
 
 ---

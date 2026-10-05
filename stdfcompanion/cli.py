@@ -290,5 +290,133 @@ def repair_cmd(input, output, check_after, verbose):
     sys.exit(0)
 
 
+# ---------------------------------------------------------------------------
+# inspect sub-command
+# ---------------------------------------------------------------------------
+
+@main.command("inspect")
+@click.argument(
+    "input",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "-r", "--record",
+    "record_types",
+    multiple=True,
+    metavar="TYPE",
+    help="Only show this record type (e.g. PTR, MIR). Repeat for multiple types.",
+)
+@click.option(
+    "--head",
+    "head_filter",
+    type=int,
+    default=None,
+    help="Filter records by HEAD_NUM.",
+)
+@click.option(
+    "--site",
+    "site_filter",
+    type=int,
+    default=None,
+    help="Filter records by SITE_NUM.",
+)
+@click.option(
+    "--part",
+    "part_filter",
+    type=int,
+    default=None,
+    help="Only show records in the Nth PIR/PRR block (1-based).",
+)
+@click.option(
+    "-n", "--limit",
+    type=int,
+    default=None,
+    help="Stop after N matching records.",
+)
+@click.option(
+    "-o", "--output",
+    "output_file",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write output to a file instead of stdout.",
+)
+@click.option(
+    "--summary",
+    "output_format",
+    flag_value="summary",
+    default=False,
+    help="Print a one-line-per-type summary table.",
+)
+@click.option(
+    "--json",
+    "output_format",
+    flag_value="json",
+    help="Output as JSON array.",
+)
+@click.option(
+    "--text",
+    "output_format",
+    flag_value="text",
+    default=True,
+    help="Output as human-readable text (default).",
+)
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print progress information.",
+)
+def inspect_cmd(input, record_types, head_filter, site_filter,
+                part_filter, limit, output_file, output_format, verbose):
+    """Dump the contents of an STDF file in human-readable form.
+
+    \b
+    Examples:
+        # Full text dump
+        stdfcompanion inspect file.stdf
+
+        # Summary table (record counts)
+        stdfcompanion inspect file.stdf --summary
+
+        # Only PTR records for head=1, site=1
+        stdfcompanion inspect file.stdf -r PTR --head 1 --site 1
+
+        # First PIR/PRR block in detail
+        stdfcompanion inspect file.stdf --part 1
+
+        # First 20 records as JSON
+        stdfcompanion inspect file.stdf --json -n 20
+
+        # Write full dump to a text file
+        stdfcompanion inspect file.stdf -o dump.txt
+
+        # Only MIR and MRR
+        stdfcompanion inspect file.stdf -r MIR -r MRR
+    """
+    from stdfcompanion.commands.inspect import inspect_stdf
+
+    try:
+        output = inspect_stdf(
+            input,
+            record_types=list(record_types) if record_types else None,
+            head_filter=head_filter,
+            site_filter=site_filter,
+            part_filter=part_filter,
+            limit=limit,
+            output_format=output_format,
+            verbose=verbose,
+        )
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if output_file:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(output)
+        click.echo(f"Output written to: {output_file}")
+    else:
+        click.echo(output, nl=False)
+
+
 if __name__ == "__main__":
     main()
