@@ -13,13 +13,19 @@ Merge strategy
     the merged file inherits lot metadata from file 1.
 4.  **SDR / RDR / WCR** – forwarded from each file in order (de-duplicated
     by key where sensible).
-5.  **Body records** (WIR/WRR, PIR/PRR, PTR, FTR, MPR, TSR, HBR, SBR, PCR,
-    PMR, PGR, PLR, DTR, BPS, EPS, GDR) – all records from every input file
-    are forwarded in file order.
+5.  **Body records** (WIR/WRR, PIR/PRR, PTR, FTR, MPR, PMR, PGR, PLR,
+    DTR, BPS, EPS, GDR) – all records from every input file are forwarded
+    in file order.
 6.  **PCR / HBR / SBR summary** – per-file summary records (HEAD_NUM=255)
     are stripped from the body stream.  After all parts are written a new
     set of merged summary records is computed and written.
-7.  **MRR** – a single MRR is written last.  FINISH_T = max(FINISH_T) across
+    Per-file: if a HEAD_NUM=255 summary PCR exists it is used exclusively
+    (ignoring per-site PCRs for that file) to avoid double-counting.
+7.  **TSR** – stripped from the body stream and re-emitted after summaries.
+    De-duplicated by TEST_NUM: when the same TEST_NUM appears in multiple
+    files its EXEC_CNT and FAIL_CNT are summed; other fields (limits, name)
+    are taken from the first file.
+8.  **MRR** – a single MRR is written last.  FINISH_T = max(FINISH_T) across
     all input files; DISP_COD kept from file 1.
 
 The output file always uses little-endian byte order (CPU_TYPE=2).
@@ -153,7 +159,8 @@ def merge_stdf(
     # Header records to skip when streaming body (will be written explicitly)
     HEADER_RECS = {REC_FAR, REC_ATR, REC_MIR}
     # Summary records to suppress from body stream (will be recomputed)
-    SUMMARY_RECS = {REC_MRR, REC_PCR, REC_HBR, REC_SBR}
+    REC_TSR  = (V4.Tsr.typ,  V4.Tsr.sub)
+    SUMMARY_RECS = {REC_MRR, REC_PCR, REC_HBR, REC_SBR, REC_TSR}
     # Records to suppress altogether because they are per-lot singletons
     # that make no sense when merged (keep only from file 1)
     SINGLETON_RECS: set = set()
@@ -218,26 +225,37 @@ def merge_stdf(
     # ------------------------------------------------------------------
     # Step 4 – collect per-file PCR / HBR / SBR for summary recomputation
     # ------------------------------------------------------------------
-    # Accumulators: keyed by (head_num, site_num) for PCR; (head, site, bin) for HBR/SBR
+    # PCR strategy: for each source file, if a HEAD_NUM=255 summary PCR
+    # exists use ONLY that (many testers write both summary + per-site PCRs
+    # which would cause double-counting if we added them all).  Fall back
+    # to per-site PCRs only when no summary exists in that file.
     pcr_acc: Dict[Tuple, Dict[str, int]] = defaultdict(lambda: dict(
         PART_CNT=0, RTST_CNT=0, ABRT_CNT=0, GOOD_CNT=0, FUNC_CNT=0
     ))
-    # HBR: key=(hbin_num), value=(HBIN_CNT, HBIN_PF, HBIN_NAM) – totals only (HEAD_NUM=255)
     hbr_map: Dict[int, dict] = {}
     sbr_map: Dict[int, dict] = {}
 
     MISSING_U4 = 4_294_967_295
 
     for records in all_file_records:
+        # Determine whether this file has a summary (HEAD=255) PCR
+        has_summary_pcr = any(
+            key(rt) == REC_PCR and (_get_field(flds, rt, "HEAD_NUM") or 0) == 255
+            for rt, flds in records
+        )
+
         for rt, flds in records:
             k = key(rt)
             if k == REC_PCR:
                 head = _get_field(flds, rt, "HEAD_NUM") or 0
-                site = _get_field(flds, rt, "SITE_NUM") or 0
-                if head == 255:
-                    # Summary PCR – accumulate into global
+                if has_summary_pcr:
+                    # Only use the HEAD=255 summary record; skip per-site
+                    if head != 255:
+                        continue
                     acc = pcr_acc[(255, 0)]
                 else:
+                    # No summary – accumulate per-site entries
+                    site = _get_field(flds, rt, "SITE_NUM") or 0
                     acc = pcr_acc[(head, site)]
                 for fname in ("PART_CNT", "RTST_CNT", "ABRT_CNT", "GOOD_CNT", "FUNC_CNT"):
                     v = _get_field(flds, rt, fname)
@@ -246,7 +264,7 @@ def merge_stdf(
 
             elif k == REC_HBR:
                 head = _get_field(flds, rt, "HEAD_NUM") or 0
-                if head == 255:  # summary record – merge into totals
+                if head == 255:
                     hbin = _get_field(flds, rt, "HBIN_NUM") or 0
                     cnt  = _get_field(flds, rt, "HBIN_CNT") or 0
                     pf   = _get_field(flds, rt, "HBIN_PF")  or " "
@@ -266,7 +284,7 @@ def merge_stdf(
                         sbr_map[sbin] = {"cnt": 0, "pf": pf, "nam": nam}
                     sbr_map[sbin]["cnt"] += cnt
 
-    # If no summary PCR was found, try to build from per-part PRR records
+    # If no PCR at all was found, build counts from PRR records
     if not pcr_acc:
         for records in all_file_records:
             for rt, flds in records:
@@ -276,9 +294,62 @@ def merge_stdf(
                     acc = pcr_acc[(head, site)]
                     acc["PART_CNT"] = acc.get("PART_CNT", 0) + 1
                     part_flg = _get_field(flds, rt, "PART_FLG") or 0
-                    # bit3 = 0 means pass
                     if not (part_flg & 0x08):
                         acc["GOOD_CNT"] = acc.get("GOOD_CNT", 0) + 1
+
+    # ------------------------------------------------------------------
+    # Step 4b – collect TSR records and merge by TEST_NUM
+    # ------------------------------------------------------------------
+    # Key: (HEAD_NUM, SITE_NUM, TEST_NUM).  Counts (EXEC_CNT, FAIL_CNT,
+    # ALRM_CNT) are summed; all other fields taken from the first file.
+    # TEST_TYP and TEST_NAM are kept from the first occurrence.
+    tsr_map: Dict[Tuple, Tuple] = {}   # key → (rt, flds)
+
+    for records in all_file_records:
+        for rt, flds in records:
+            if key(rt) != REC_TSR:
+                continue
+            head     = _get_field(flds, rt, "HEAD_NUM") or 1
+            site     = _get_field(flds, rt, "SITE_NUM") or 1
+            test_num = _get_field(flds, rt, "TEST_NUM")
+            if test_num is None:
+                continue
+            tkey = (head, site, test_num)
+            if tkey not in tsr_map:
+                tsr_map[tkey] = (rt, list(flds))
+            else:
+                # Merge statistical and count fields into the stored entry
+                _, stored = tsr_map[tkey]
+
+                def _update(field_name: str, new_val, op: str) -> None:
+                    """Apply op ('add'|'min'|'max') to stored field."""
+                    if new_val is None or new_val == MISSING_U4:
+                        return
+                    try:
+                        idx = rt.fieldNames.index(field_name)
+                    except ValueError:
+                        return
+                    while len(stored) <= idx:
+                        stored.append(None)
+                    old_val = stored[idx]
+                    if old_val is None or old_val == MISSING_U4:
+                        stored[idx] = new_val
+                    elif op == "add":
+                        stored[idx] = old_val + new_val
+                    elif op == "min":
+                        stored[idx] = min(old_val, new_val)
+                    elif op == "max":
+                        stored[idx] = max(old_val, new_val)
+
+                # Counts – add
+                for fname in ("EXEC_CNT", "FAIL_CNT", "ALRM_CNT"):
+                    _update(fname, _get_field(flds, rt, fname), "add")
+                # Statistical accumulators – add
+                for fname in ("TEST_TIM", "TST_SUMS", "TST_SQRS"):
+                    _update(fname, _get_field(flds, rt, fname), "add")
+                # Extremes – min / max
+                _update("TEST_MIN", _get_field(flds, rt, "TEST_MIN"), "min")
+                _update("TEST_MAX", _get_field(flds, rt, "TEST_MAX"), "max")
 
     # ------------------------------------------------------------------
     # Step 5 – write output file
@@ -387,6 +458,11 @@ def merge_stdf(
                 info["nam"],
             ]
             writer.write_record(V4.Sbr, sbr_flds)
+
+        # TSR – merged de-duplicated records sorted by (head, site, test_num)
+        for tkey in sorted(tsr_map.keys()):
+            tsr_rt, tsr_flds = tsr_map[tkey]
+            writer.write_record(tsr_rt, tsr_flds)
 
         # ------------------------------------------------------------------
         # Step 7 – MRR (must be last)
